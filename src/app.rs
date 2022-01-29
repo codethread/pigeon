@@ -29,17 +29,22 @@ pub enum AppEvent {
 use std::collections::HashMap;
 
 use crossterm::event::KeyCode;
+use log::info;
 use rust_fsm::StateMachine;
 
 use crate::{
     experiments::UserMachine,
     modes::{update_modeline, Ctx, Cursor, Modes},
-    renderer::{RendResult, Renderer},
+    renderer::{RendResult, Renderer, UI},
 };
+
+use self::buffer::Buffer;
 
 pub struct App {
     pub renderer: Renderer,
+    pub ui: UI,
     pub user_machine: StateMachine<UserMachine>,
+    pub buffers: Vec<Buffer>,
     pub modes: Modes,
     pub queue: Vec<AppEvent>,
     // cbs: HashMap<AppEvent, Vec<Box<dyn FnOnce(&mut Ctx<'_>, &AppEvent)>>>,
@@ -48,40 +53,56 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
+        info!("creating app");
         let mut app = Self {
             renderer: Default::default(),
+            buffers: Default::default(),
             user_machine: Default::default(),
             modes: Default::default(),
             queue: Default::default(),
             cbs: Default::default(),
+            ui: Default::default(),
         };
 
+        info!("created app: {:?}", &app);
+
         {
-            // XXX: small hack just to get a first line in
+            let buff = Buffer::build()
+                .with_text("scratch buffer".to_string())
+                .with_window(0)
+                .create();
 
-            let first_line = app.modes.ui.body.get_mut(0).unwrap();
-            let buffer_line = &app
-                .modes
-                .buff
-                .buffers
-                .get(0)
-                .expect("buffer should exist")
-                .content;
+            app.ui.get_active_window().set_buffer(0, &buff);
 
-            let buffer_line = buffer_line.get(0).expect("buffer should have text");
-
-            *first_line = buffer_line.clone();
-
-            app.modes.ui.update_cursor(|Cursor { col, row }| Cursor {
-                row: *row,
-                col: col + buffer_line.len(),
-            });
+            app.buffers.push(buff);
         }
 
-        app.cbs.insert(
-            AppEventKey::from(AppEvent::Move(0, 0)),
-            vec![update_modeline],
-        );
+        // {
+        //     // XXX: small hack just to get a first line in
+
+        //     let first_line = app.modes.ui.body.get_mut(0).unwrap();
+        //     let buffer_line = &app
+        //         .modes
+        //         .buff
+        //         .buffers
+        //         .get(0)
+        //         .expect("buffer should exist")
+        //         .content;
+
+        //     let buffer_line = buffer_line.get(0).expect("buffer should have text");
+
+        //     *first_line = buffer_line.clone();
+
+        //     app.modes.ui.update_cursor(|Cursor { col, row }| Cursor {
+        //         row: *row,
+        //         col: col + buffer_line.len(),
+        //     });
+        // }
+
+        // app.cbs.insert(
+        //     AppEventKey::from(AppEvent::Move(0, 0)),
+        //     vec![update_modeline],
+        // );
 
         app
     }
@@ -122,10 +143,12 @@ impl App {
             _ => (),
         }
 
-        let ui = self.modes.ui.for_tui();
+        // let ui = self.modes.ui.for_tui();
 
-        self.renderer.draw(ui)?;
-        self.renderer.cursor(&self.modes.ui.cursor)?;
+        // self.renderer.draw(ui)?;
+        // self.renderer.cursor(&self.modes.ui.cursor)?;
+        let screen = self.ui.screen();
+        self.renderer.render(screen)?;
 
         Ok(())
     }
@@ -148,8 +171,9 @@ impl App {
 
         let ui = self.modes.ui.for_tui();
 
-        self.renderer.draw(ui)?;
-        self.renderer.cursor(&self.modes.ui.cursor)?;
+        // self.renderer.draw(ui)?;
+        // self.renderer.cursor(&self.modes.ui.cursor)?;
+        // self.renderer.render()?;
 
         Ok(())
     }
@@ -161,5 +185,115 @@ impl std::fmt::Debug for App {
             .field("renderer", &self.renderer)
             .field("user_machine", &self.user_machine.state())
             .finish()
+    }
+}
+
+pub mod buffer {
+    use log::info;
+    use ropey::{Rope, RopeSlice};
+
+    use crate::modes::Cursor;
+
+    pub struct Lines<'a> {
+        pub lines: RopeSlice<'a>,
+        pub empty: usize,
+    }
+
+    #[derive(Default, Debug)]
+    pub struct Buffer {
+        text: Rope,
+
+        /// structure tree-sitter document, will do later
+        doc: Option<i32>,
+
+        /// reference to window ID if buffer is visible
+        window: Option<usize>,
+
+        cursor: Cursor,
+    }
+
+    impl Buffer {
+        pub fn new(text: Rope, doc: Option<i32>, window: Option<usize>) -> Self {
+            Self {
+                text,
+                doc,
+                window,
+                cursor: Default::default(),
+            }
+        }
+
+        pub fn build() -> BufferBuilder {
+            BufferBuilder::default()
+        }
+
+        pub fn open_in_window(&mut self, win_id: usize) {
+            // TODO: event to tell old window of change?
+            self.window = Some(win_id);
+        }
+
+        pub fn remove_from_window(&mut self) {
+            // TODO: event to tell old window of change?
+            self.window = None;
+        }
+
+        pub fn get_cursor(&self) -> &Cursor {
+            &self.cursor
+        }
+
+        pub fn get_lines_range(&self, start: usize, end: usize) -> Lines {
+            info!("getting lines start {} end {}", start, end);
+            let size_request = end - start;
+            let empty = size_request.saturating_sub(self.text.len_lines());
+
+            let start_post = self.text.line_to_char(start);
+
+            info!("empty {}", empty);
+            let end_pos = if empty == 0 {
+                Some(self.text.line_to_char(end + 1))
+            } else {
+                None
+            };
+
+            let slice = match end_pos {
+                Some(end_pos) => self.text.slice(start_post..end_pos),
+                None => self.text.slice(start_post..),
+            };
+
+            Lines {
+                lines: slice,
+                empty,
+            }
+        }
+    }
+
+    #[derive(Default, Debug)]
+    pub struct BufferBuilder {
+        text: Option<Rope>,
+        doc: Option<i32>,
+        window: Option<usize>,
+    }
+
+    impl BufferBuilder {
+        /// panics if values not met
+        pub fn create(self) -> Buffer {
+            match self {
+                BufferBuilder {
+                    text: Some(text),
+                    doc,
+                    window,
+                } => Buffer::new(text, doc, window),
+                _ => panic!("Buffer constraints not met"),
+            }
+        }
+
+        pub fn with_text(mut self, text: String) -> Self {
+            self.text = Some(Rope::from(text));
+            self
+        }
+
+        pub fn with_window(mut self, win: usize) -> Self {
+            self.window = Some(win);
+            self
+        }
     }
 }

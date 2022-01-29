@@ -2,8 +2,11 @@ use crossterm::cursor::{Hide, MoveTo, MoveToNextLine, RestorePosition, SavePosit
 use crossterm::style::{
     Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType, DisableLineWrap};
+use crossterm::terminal::{
+    self, disable_raw_mode, enable_raw_mode, Clear, ClearType, DisableLineWrap,
+};
 use crossterm::{ExecutableCommand, QueueableCommand};
+use log::info;
 use std::fmt::Display;
 use std::io::{self, Error, Stdout, Write};
 
@@ -11,72 +14,9 @@ use crate::modes::Cursor;
 
 pub type RendResult = Result<(), std::io::Error>;
 
-pub struct UiCtx {
-    pub stdout: Stdout,
-    pub row_start: u16,
-    pub row_end: u16,
-    pub col_start: u16,
-    pub col_end: u16,
-}
+mod widgets;
 
-pub trait Widget {
-    fn render(&self, ui_ctx: &mut UiCtx) -> RendResult;
-}
-
-pub struct Span {
-    msg: String,
-    style: Option<Attribute>,
-    fg: Option<Color>,
-    bg: Option<Color>,
-}
-
-impl Span {
-    pub fn new(msg: String) -> Self {
-        Self {
-            msg,
-            style: None,
-            fg: None,
-            bg: None,
-        }
-    }
-
-    pub fn style(mut self, atrr: Attribute) -> Self {
-        self.style = Some(atrr);
-        self
-    }
-}
-
-impl Widget for Line {
-    fn render(&self, ui_ctx: &mut UiCtx) -> RendResult {
-        let mut r = &ui_ctx.stdout;
-
-        // TODO simple clear for now
-        r.queue(MoveTo(ui_ctx.row_start, ui_ctx.col_start))?;
-        r.queue(Print(format!(
-            "{:>width$}",
-            " ",
-            width = (ui_ctx.col_end - ui_ctx.col_start) as usize
-        )))?;
-
-        self.spans.iter().for_each(|Span { fg, bg, msg, style }| {
-            fg.map(|c| r.queue(SetForegroundColor(c)).unwrap());
-            bg.map(|c| r.queue(SetBackgroundColor(c)).unwrap());
-            style.map(|c| r.queue(SetAttribute(c)).unwrap());
-
-            r.queue(Print(msg)).unwrap();
-
-            fg.map(|_| r.queue(SetForegroundColor(Color::Black)).unwrap());
-            bg.map(|_| r.queue(SetBackgroundColor(Color::Reset)).unwrap());
-            style.map(|_| r.queue(SetAttribute(Attribute::Reset)).unwrap());
-        });
-
-        Ok(())
-    }
-}
-
-pub struct Line {
-    pub spans: Vec<Span>,
-}
+use self::widgets::*;
 
 #[derive(Debug)]
 pub struct Renderer {
@@ -104,43 +44,25 @@ impl Renderer {
 
         clear(&mut stdout).unwrap();
 
+        let (columns, rows) = terminal::size().expect("could not get terminal size");
+
         Self { stdout }
     }
 
-    pub fn paint<T: Display>(&mut self, msg: &T) -> RendResult {
-        self.msg(msg)?;
+    pub fn render<T: Widget>(&mut self, screen: &mut T) -> RendResult {
+        let (columns, rows) = terminal::size().expect("could not get terminal size");
 
-        Ok(())
-    }
+        let mut ctx = UiCtx {
+            stdout: &mut self.stdout,
+            row_start: 0,
+            row_end: 1,
+            col_start: 0,
+            col_end: columns,
+        };
 
-    pub fn prompt(&mut self) -> RendResult {
-        self.msg(&"choose (a): cat, (b): dog, (c): fish")?;
+        screen.render(&mut ctx)?;
 
-        Ok(())
-    }
-
-    pub fn draw(&mut self, ui: String) -> RendResult {
-        self.stdout.queue(MoveTo(0, 0))?;
-
-        for line in ui.lines() {
-            self.stdout
-                .queue(Clear(ClearType::CurrentLine))?
-                .queue(Print(line))?
-                .queue(MoveToNextLine(1))?;
-        }
-
-        self.stdout.flush()?;
-
-        Ok(())
-    }
-
-    fn msg<T: Display>(&mut self, msg: &T) -> RendResult {
-        self.stdout
-            .queue(Print("---------------"))?
-            .queue(MoveToNextLine(1))?
-            .queue(Print(msg))?
-            .queue(MoveToNextLine(1))?
-            .flush()?;
+        ctx.stdout.flush()?;
 
         Ok(())
     }
@@ -170,6 +92,91 @@ impl Drop for Renderer {
             .execute(Show)
             .unwrap();
 
+        info!("App dropped\n\n");
+
         disable_raw_mode().unwrap();
+    }
+}
+
+#[derive(Debug)]
+pub struct UI {
+    widgets: List,
+    windows: Vec<Window>,
+    active_window: usize,
+}
+
+impl Default for UI {
+    fn default() -> Self {
+        let mut main_window = Window::default();
+        let (cols, rows) = terminal::size().expect("could not get terminal size");
+
+        let cols = cols.try_into().unwrap();
+        let rows = rows.try_into().unwrap();
+
+        main_window.resize(rows, cols);
+        Self {
+            widgets: Default::default(),
+            windows: vec![main_window],
+            active_window: 0,
+        }
+    }
+}
+
+impl UI {
+    pub fn get_active_window(&mut self) -> &mut Window {
+        self.windows
+            .get_mut(self.active_window)
+            .expect("could not get active window")
+    }
+
+    // temporary
+    pub fn screen(&mut self) -> &mut Window {
+        self.get_active_window()
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct Window {
+    buffer: usize,
+    contents: List,
+    did_update: bool,
+    rows: usize,
+    cols: usize,
+}
+
+use crate::app::buffer::Buffer;
+
+impl Window {
+    pub fn set_buffer(&mut self, buff_id: usize, buffer: &Buffer) {
+        self.buffer = buff_id;
+
+        // start simple and set row as start of view
+        let Cursor { row, .. } = buffer.get_cursor();
+
+        let lines = buffer.get_lines_range(*row, row + self.rows);
+        let mut list = List::from(lines);
+        list.expand(self.rows);
+        self.contents = list;
+    }
+
+    pub fn resize(&mut self, rows: usize, cols: usize) {
+        self.rows = rows;
+        self.cols = cols;
+    }
+}
+
+impl Widget for Window {
+    type Components = List;
+
+    fn render(&mut self, ui_ctx: &mut UiCtx) -> RendResult {
+        self.contents.render(ui_ctx)
+    }
+
+    fn did_update(&self) -> bool {
+        self.did_update
+    }
+
+    fn update(&mut self, cb: impl FnMut(&mut Self::Components)) {
+        todo!()
     }
 }

@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
-use crate::{
-    app::App,
-    renderer::{Line, Span, UiCtx, Widget},
-};
+use crate::{app::App, logger::*};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Hello, world!");
+    init_logger();
+
+    info!("app starting");
 
     let mut app = App::default();
 
@@ -27,25 +27,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.idle()?;
     }
 
-    // let line = Line {
-    //     spans: vec![
-    //         Span::new("hello there ".to_string()),
-    //         Span::new("chunk".to_string()).style(crossterm::style::Attribute::Bold),
-    //     ],
-    // };
-
-    // let mut stdout = std::io::stdout();
-    // let mut ui_ctx = UiCtx {
-    //     stdout,
-    //     row_start: 7,
-    //     row_end: 8,
-    //     col_start: 5,
-    //     col_end: 20,
-    // };
-
-    // line.render(&mut ui_ctx)?;
-
     Ok(())
+}
+
+mod text {
+    use ropey::Rope;
+    use ropey::{iter::Chunks, RopeSlice};
+    use std::fs::File;
+    use std::io::{BufReader, BufWriter};
+
+    pub fn get_file(file: &str) -> Result<Rope, std::io::Error> {
+        Rope::from_reader(BufReader::new(File::open(file)?))
+    }
 }
 
 mod app;
@@ -55,3 +48,5 @@ mod renderer;
 mod experiments;
 
 mod modes;
+
+mod logger;
